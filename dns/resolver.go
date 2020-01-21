@@ -166,12 +166,21 @@ func (r *Resolver) IsMapping() bool {
 	return r.mapping
 }
 
-func (r *Resolver) IsFakeIP() bool {
+// FakeIPEnabled returns if fake-ip is enabled
+func (r *Resolver) FakeIPEnabled() bool {
 	return r.fakeip
 }
 
+// IsFakeIP determine if given ip is a fake-ip
+func (r *Resolver) IsFakeIP(ip net.IP) bool {
+	if r.FakeIPEnabled() {
+		return r.pool.Exist(ip)
+	}
+	return false
+}
+
 func (r *Resolver) batchExchange(clients []resolver, m *D.Msg) (msg *D.Msg, err error) {
-	fast, ctx := picker.WithTimeout(context.Background(), time.Second)
+	fast, ctx := picker.WithTimeout(context.Background(), time.Second * 5)
 	for _, client := range clients {
 		r := client
 		fast.Go(func() (interface{}, error) {
