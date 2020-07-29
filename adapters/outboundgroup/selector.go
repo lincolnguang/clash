@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 
 	"github.com/Dreamacro/clash/adapters/outbound"
 	"github.com/Dreamacro/clash/adapters/provider"
@@ -15,33 +14,33 @@ import (
 type Selector struct {
 	*outbound.Base
 	single    *singledo.Single
-	selected  C.Proxy
+	selected  string
 	providers []provider.ProxyProvider
 }
 
 func (s *Selector) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
-	c, err := s.selected.DialContext(ctx, metadata)
+	c, err := s.selectedProxy().DialContext(ctx, metadata)
 	if err == nil {
 		c.AppendToChains(s)
 	}
 	return c, err
 }
 
-func (s *Selector) DialUDP(metadata *C.Metadata) (C.PacketConn, net.Addr, error) {
-	pc, addr, err := s.selected.DialUDP(metadata)
+func (s *Selector) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
+	pc, err := s.selectedProxy().DialUDP(metadata)
 	if err == nil {
 		pc.AppendToChains(s)
 	}
-	return pc, addr, err
+	return pc, err
 }
 
 func (s *Selector) SupportUDP() bool {
-	return s.selected.SupportUDP()
+	return s.selectedProxy().SupportUDP()
 }
 
 func (s *Selector) MarshalJSON() ([]byte, error) {
 	var all []string
-	for _, proxy := range s.proxies() {
+	for _, proxy := range getProvidersProxies(s.providers) {
 		all = append(all, proxy.Name())
 	}
 
@@ -53,13 +52,14 @@ func (s *Selector) MarshalJSON() ([]byte, error) {
 }
 
 func (s *Selector) Now() string {
-	return s.selected.Name()
+	return s.selectedProxy().Name()
 }
 
 func (s *Selector) Set(name string) error {
-	for _, proxy := range s.proxies() {
+	for _, proxy := range getProvidersProxies(s.providers) {
 		if proxy.Name() == name {
-			s.selected = proxy
+			s.selected = name
+			s.single.Reset()
 			return nil
 		}
 	}
@@ -67,18 +67,29 @@ func (s *Selector) Set(name string) error {
 	return errors.New("Proxy does not exist")
 }
 
-func (s *Selector) proxies() []C.Proxy {
+func (s *Selector) Unwrap(metadata *C.Metadata) C.Proxy {
+	return s.selectedProxy()
+}
+
+func (s *Selector) selectedProxy() C.Proxy {
 	elm, _, _ := s.single.Do(func() (interface{}, error) {
-		return getProvidersProxies(s.providers), nil
+		proxies := getProvidersProxies(s.providers)
+		for _, proxy := range proxies {
+			if proxy.Name() == s.selected {
+				return proxy, nil
+			}
+		}
+
+		return proxies[0], nil
 	})
 
-	return elm.([]C.Proxy)
+	return elm.(C.Proxy)
 }
 
 func NewSelector(name string, providers []provider.ProxyProvider) *Selector {
-	selected := providers[0].Proxies()[0]
+	selected := providers[0].Proxies()[0].Name()
 	return &Selector{
-		Base:      outbound.NewBase(name, C.Selector, false),
+		Base:      outbound.NewBase(name, "", C.Selector, false),
 		single:    singledo.NewSingle(defaultGetProxiesDuration),
 		providers: providers,
 		selected:  selected,

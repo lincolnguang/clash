@@ -1,26 +1,20 @@
 package provider
 
 import (
-	"bytes"
-	"crypto/md5"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
-	"os"
+	"runtime"
 	"time"
 
 	"github.com/Dreamacro/clash/adapters/outbound"
 	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/log"
 
 	"gopkg.in/yaml.v2"
 )
 
 const (
 	ReservedName = "default"
-
-	fileMode = 0666
 )
 
 // Provider Type
@@ -49,8 +43,7 @@ type Provider interface {
 	VehicleType() VehicleType
 	Type() ProviderType
 	Initial() error
-	Reload() error
-	Destroy() error
+	Update() error
 }
 
 // ProxyProvider interface
@@ -58,24 +51,24 @@ type ProxyProvider interface {
 	Provider
 	Proxies() []C.Proxy
 	HealthCheck()
-	Update() error
 }
 
 type ProxySchema struct {
 	Proxies []map[string]interface{} `yaml:"proxies"`
 }
 
+// for auto gc
 type ProxySetProvider struct {
-	name        string
-	vehicle     Vehicle
-	hash        [16]byte
-	proxies     []C.Proxy
-	healthCheck *HealthCheck
-	ticker      *time.Ticker
-	updatedAt   *time.Time
+	*proxySetProvider
 }
 
-func (pp *ProxySetProvider) MarshalJSON() ([]byte, error) {
+type proxySetProvider struct {
+	*fetcher
+	proxies     []C.Proxy
+	healthCheck *HealthCheck
+}
+
+func (pp *proxySetProvider) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]interface{}{
 		"name":        pp.Name(),
 		"type":        pp.Type().String(),
@@ -85,119 +78,41 @@ func (pp *ProxySetProvider) MarshalJSON() ([]byte, error) {
 	})
 }
 
-func (pp *ProxySetProvider) Name() string {
+func (pp *proxySetProvider) Name() string {
 	return pp.name
 }
 
-func (pp *ProxySetProvider) Reload() error {
-	return nil
-}
-
-func (pp *ProxySetProvider) HealthCheck() {
+func (pp *proxySetProvider) HealthCheck() {
 	pp.healthCheck.check()
 }
 
-func (pp *ProxySetProvider) Update() error {
-	return pp.pull()
+func (pp *proxySetProvider) Update() error {
+	elm, same, err := pp.fetcher.Update()
+	if err == nil && !same {
+		pp.onUpdate(elm)
+	}
+	return err
 }
 
-func (pp *ProxySetProvider) Destroy() error {
-	pp.healthCheck.close()
-
-	if pp.ticker != nil {
-		pp.ticker.Stop()
-	}
-
-	return nil
-}
-
-func (pp *ProxySetProvider) Initial() error {
-	var buf []byte
-	var err error
-	if stat, err := os.Stat(pp.vehicle.Path()); err == nil {
-		buf, err = ioutil.ReadFile(pp.vehicle.Path())
-		modTime := stat.ModTime()
-		pp.updatedAt = &modTime
-	} else {
-		buf, err = pp.vehicle.Read()
-	}
-
+func (pp *proxySetProvider) Initial() error {
+	elm, err := pp.fetcher.Initial()
 	if err != nil {
 		return err
 	}
 
-	proxies, err := pp.parse(buf)
-	if err != nil {
-		return err
-	}
-
-	if err := ioutil.WriteFile(pp.vehicle.Path(), buf, fileMode); err != nil {
-		return err
-	}
-
-	pp.hash = md5.Sum(buf)
-	pp.setProxies(proxies)
-
-	// pull proxies automatically
-	if pp.ticker != nil {
-		go pp.pullLoop()
-	}
-
+	pp.onUpdate(elm)
 	return nil
 }
 
-func (pp *ProxySetProvider) VehicleType() VehicleType {
-	return pp.vehicle.Type()
-}
-
-func (pp *ProxySetProvider) Type() ProviderType {
+func (pp *proxySetProvider) Type() ProviderType {
 	return Proxy
 }
 
-func (pp *ProxySetProvider) Proxies() []C.Proxy {
+func (pp *proxySetProvider) Proxies() []C.Proxy {
 	return pp.proxies
 }
 
-func (pp *ProxySetProvider) pullLoop() {
-	for range pp.ticker.C {
-		if err := pp.pull(); err != nil {
-			log.Warnln("[Provider] %s pull error: %s", pp.Name(), err.Error())
-		}
-	}
-}
-
-func (pp *ProxySetProvider) pull() error {
-	buf, err := pp.vehicle.Read()
-	if err != nil {
-		return err
-	}
-
-	now := time.Now()
-	hash := md5.Sum(buf)
-	if bytes.Equal(pp.hash[:], hash[:]) {
-		log.Debugln("[Provider] %s's proxies doesn't change", pp.Name())
-		pp.updatedAt = &now
-		return nil
-	}
-
-	proxies, err := pp.parse(buf)
-	if err != nil {
-		return err
-	}
-	log.Infoln("[Provider] %s's proxies update", pp.Name())
-
-	if err := ioutil.WriteFile(pp.vehicle.Path(), buf, fileMode); err != nil {
-		return err
-	}
-
-	pp.updatedAt = &now
-	pp.hash = hash
-	pp.setProxies(proxies)
-
-	return nil
-}
-
-func (pp *ProxySetProvider) parse(buf []byte) ([]C.Proxy, error) {
+func proxiesParse(buf []byte) (interface{}, error) {
 	schema := &ProxySchema{}
 
 	if err := yaml.Unmarshal(buf, schema); err != nil {
@@ -224,38 +139,54 @@ func (pp *ProxySetProvider) parse(buf []byte) ([]C.Proxy, error) {
 	return proxies, nil
 }
 
-func (pp *ProxySetProvider) setProxies(proxies []C.Proxy) {
+func (pp *proxySetProvider) setProxies(proxies []C.Proxy) {
 	pp.proxies = proxies
 	pp.healthCheck.setProxy(proxies)
-	go pp.healthCheck.check()
+	if pp.healthCheck.auto() {
+		go pp.healthCheck.check()
+	}
+}
+
+func stopProxyProvider(pd *ProxySetProvider) {
+	pd.healthCheck.close()
+	pd.fetcher.Destroy()
 }
 
 func NewProxySetProvider(name string, interval time.Duration, vehicle Vehicle, hc *HealthCheck) *ProxySetProvider {
-	var ticker *time.Ticker
-	if interval != 0 {
-		ticker = time.NewTicker(interval)
-	}
-
 	if hc.auto() {
 		go hc.process()
 	}
 
-	return &ProxySetProvider{
-		name:        name,
-		vehicle:     vehicle,
+	pd := &proxySetProvider{
 		proxies:     []C.Proxy{},
 		healthCheck: hc,
-		ticker:      ticker,
 	}
+
+	onUpdate := func(elm interface{}) {
+		ret := elm.([]C.Proxy)
+		pd.setProxies(ret)
+	}
+
+	fetcher := newFetcher(name, interval, vehicle, proxiesParse, onUpdate)
+	pd.fetcher = fetcher
+
+	wrapper := &ProxySetProvider{pd}
+	runtime.SetFinalizer(wrapper, stopProxyProvider)
+	return wrapper
 }
 
-type CompatibleProvier struct {
+// for auto gc
+type CompatibleProvider struct {
+	*compatibleProvider
+}
+
+type compatibleProvider struct {
 	name        string
 	healthCheck *HealthCheck
 	proxies     []C.Proxy
 }
 
-func (cp *CompatibleProvier) MarshalJSON() ([]byte, error) {
+func (cp *compatibleProvider) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]interface{}{
 		"name":        cp.Name(),
 		"type":        cp.Type().String(),
@@ -264,44 +195,39 @@ func (cp *CompatibleProvier) MarshalJSON() ([]byte, error) {
 	})
 }
 
-func (cp *CompatibleProvier) Name() string {
+func (cp *compatibleProvider) Name() string {
 	return cp.name
 }
 
-func (cp *CompatibleProvier) Reload() error {
-	return nil
-}
-
-func (cp *CompatibleProvier) Destroy() error {
-	cp.healthCheck.close()
-	return nil
-}
-
-func (cp *CompatibleProvier) HealthCheck() {
+func (cp *compatibleProvider) HealthCheck() {
 	cp.healthCheck.check()
 }
 
-func (cp *CompatibleProvier) Update() error {
+func (cp *compatibleProvider) Update() error {
 	return nil
 }
 
-func (cp *CompatibleProvier) Initial() error {
+func (cp *compatibleProvider) Initial() error {
 	return nil
 }
 
-func (cp *CompatibleProvier) VehicleType() VehicleType {
+func (cp *compatibleProvider) VehicleType() VehicleType {
 	return Compatible
 }
 
-func (cp *CompatibleProvier) Type() ProviderType {
+func (cp *compatibleProvider) Type() ProviderType {
 	return Proxy
 }
 
-func (cp *CompatibleProvier) Proxies() []C.Proxy {
+func (cp *compatibleProvider) Proxies() []C.Proxy {
 	return cp.proxies
 }
 
-func NewCompatibleProvier(name string, proxies []C.Proxy, hc *HealthCheck) (*CompatibleProvier, error) {
+func stopCompatibleProvider(pd *CompatibleProvider) {
+	pd.healthCheck.close()
+}
+
+func NewCompatibleProvider(name string, proxies []C.Proxy, hc *HealthCheck) (*CompatibleProvider, error) {
 	if len(proxies) == 0 {
 		return nil, errors.New("Provider need one proxy at least")
 	}
@@ -310,9 +236,13 @@ func NewCompatibleProvier(name string, proxies []C.Proxy, hc *HealthCheck) (*Com
 		go hc.process()
 	}
 
-	return &CompatibleProvier{
+	pd := &compatibleProvider{
 		name:        name,
 		proxies:     proxies,
 		healthCheck: hc,
-	}, nil
+	}
+
+	wrapper := &CompatibleProvider{pd}
+	runtime.SetFinalizer(wrapper, stopCompatibleProvider)
+	return wrapper, nil
 }

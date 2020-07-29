@@ -56,7 +56,7 @@ func ParseProxyGroup(config map[string]interface{}, proxyMap map[string]C.Proxy,
 		// if Use not empty, drop health check options
 		if len(groupOption.Use) != 0 {
 			hc := provider.NewHealthCheck(ps, "", 0)
-			pd, err := provider.NewCompatibleProvier(groupName, ps, hc)
+			pd, err := provider.NewCompatibleProvider(groupName, ps, hc)
 			if err != nil {
 				return nil, err
 			}
@@ -64,9 +64,9 @@ func ParseProxyGroup(config map[string]interface{}, proxyMap map[string]C.Proxy,
 			providers = append(providers, pd)
 		} else {
 			// select don't need health check
-			if groupOption.Type == "select" {
+			if groupOption.Type == "select" || groupOption.Type == "relay" {
 				hc := provider.NewHealthCheck(ps, "", 0)
-				pd, err := provider.NewCompatibleProvier(groupName, ps, hc)
+				pd, err := provider.NewCompatibleProvider(groupName, ps, hc)
 				if err != nil {
 					return nil, err
 				}
@@ -79,7 +79,7 @@ func ParseProxyGroup(config map[string]interface{}, proxyMap map[string]C.Proxy,
 				}
 
 				hc := provider.NewHealthCheck(ps, groupOption.URL, uint(groupOption.Interval))
-				pd, err := provider.NewCompatibleProvier(groupName, ps, hc)
+				pd, err := provider.NewCompatibleProvider(groupName, ps, hc)
 				if err != nil {
 					return nil, err
 				}
@@ -101,13 +101,16 @@ func ParseProxyGroup(config map[string]interface{}, proxyMap map[string]C.Proxy,
 	var group C.ProxyAdapter
 	switch groupOption.Type {
 	case "url-test":
-		group = NewURLTest(groupName, providers)
+		opts := parseURLTestOption(config)
+		group = NewURLTest(groupName, providers, opts...)
 	case "select":
 		group = NewSelector(groupName, providers)
 	case "fallback":
 		group = NewFallback(groupName, providers)
 	case "load-balance":
 		group = NewLoadBalance(groupName, providers)
+	case "relay":
+		group = NewRelay(groupName, providers)
 	default:
 		return nil, fmt.Errorf("%w: %s", errType, groupOption.Type)
 	}

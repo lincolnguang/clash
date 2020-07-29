@@ -3,7 +3,6 @@ package outboundgroup
 import (
 	"context"
 	"encoding/json"
-	"net"
 
 	"github.com/Dreamacro/clash/adapters/outbound"
 	"github.com/Dreamacro/clash/adapters/provider"
@@ -31,13 +30,13 @@ func (f *Fallback) DialContext(ctx context.Context, metadata *C.Metadata) (C.Con
 	return c, err
 }
 
-func (f *Fallback) DialUDP(metadata *C.Metadata) (C.PacketConn, net.Addr, error) {
+func (f *Fallback) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
 	proxy := f.findAliveProxy()
-	pc, addr, err := proxy.DialUDP(metadata)
+	pc, err := proxy.DialUDP(metadata)
 	if err == nil {
 		pc.AppendToChains(f)
 	}
-	return pc, addr, err
+	return pc, err
 }
 
 func (f *Fallback) SupportUDP() bool {
@@ -55,6 +54,11 @@ func (f *Fallback) MarshalJSON() ([]byte, error) {
 		"now":  f.Now(),
 		"all":  all,
 	})
+}
+
+func (f *Fallback) Unwrap(metadata *C.Metadata) C.Proxy {
+	proxy := f.findAliveProxy()
+	return proxy
 }
 
 func (f *Fallback) proxies() []C.Proxy {
@@ -78,7 +82,7 @@ func (f *Fallback) findAliveProxy() C.Proxy {
 
 func NewFallback(name string, providers []provider.ProxyProvider) *Fallback {
 	return &Fallback{
-		Base:      outbound.NewBase(name, C.Fallback, false),
+		Base:      outbound.NewBase(name, "", C.Fallback, false),
 		single:    singledo.NewSingle(defaultGetProxiesDuration),
 		providers: providers,
 	}

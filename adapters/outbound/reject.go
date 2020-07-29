@@ -15,11 +15,11 @@ type Reject struct {
 }
 
 func (r *Reject) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
-	return newConn(&NopConn{}, r), nil
+	return NewConn(&NopConn{}, r), nil
 }
 
-func (r *Reject) DialUDP(metadata *C.Metadata) (C.PacketConn, net.Addr, error) {
-	return nil, nil, errors.New("match reject rule")
+func (r *Reject) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
+	return nil, errors.New("match reject rule")
 }
 
 func NewReject() *Reject {

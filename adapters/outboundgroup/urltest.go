@@ -3,7 +3,6 @@ package outboundgroup
 import (
 	"context"
 	"encoding/json"
-	"net"
 	"time"
 
 	"github.com/Dreamacro/clash/adapters/outbound"
@@ -12,8 +11,19 @@ import (
 	C "github.com/Dreamacro/clash/constant"
 )
 
+type urlTestOption func(*URLTest)
+
+func urlTestWithTolerance(tolerance uint16) urlTestOption {
+	return func(u *URLTest) {
+		u.tolerance = tolerance
+	}
+}
+
 type URLTest struct {
 	*outbound.Base
+	tolerance  uint16
+	lastDelay  uint16
+	fastNode   C.Proxy
 	single     *singledo.Single
 	fastSingle *singledo.Single
 	providers  []provider.ProxyProvider
@@ -31,12 +41,16 @@ func (u *URLTest) DialContext(ctx context.Context, metadata *C.Metadata) (c C.Co
 	return c, err
 }
 
-func (u *URLTest) DialUDP(metadata *C.Metadata) (C.PacketConn, net.Addr, error) {
-	pc, addr, err := u.fast().DialUDP(metadata)
+func (u *URLTest) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
+	pc, err := u.fast().DialUDP(metadata)
 	if err == nil {
 		pc.AppendToChains(u)
 	}
-	return pc, addr, err
+	return pc, err
+}
+
+func (u *URLTest) Unwrap(metadata *C.Metadata) C.Proxy {
+	return u.fast()
 }
 
 func (u *URLTest) proxies() []C.Proxy {
@@ -49,6 +63,13 @@ func (u *URLTest) proxies() []C.Proxy {
 
 func (u *URLTest) fast() C.Proxy {
 	elm, _, _ := u.fastSingle.Do(func() (interface{}, error) {
+		// tolerance
+		if u.tolerance != 0 && u.fastNode != nil {
+			if u.fastNode.LastDelay() < u.lastDelay+u.tolerance {
+				return u.fastNode, nil
+			}
+		}
+
 		proxies := u.proxies()
 		fast := proxies[0]
 		min := fast.LastDelay()
@@ -63,6 +84,9 @@ func (u *URLTest) fast() C.Proxy {
 				min = delay
 			}
 		}
+
+		u.fastNode = fast
+		u.lastDelay = fast.LastDelay()
 		return fast, nil
 	})
 
@@ -85,11 +109,30 @@ func (u *URLTest) MarshalJSON() ([]byte, error) {
 	})
 }
 
-func NewURLTest(name string, providers []provider.ProxyProvider) *URLTest {
-	return &URLTest{
-		Base:       outbound.NewBase(name, C.URLTest, false),
+func parseURLTestOption(config map[string]interface{}) []urlTestOption {
+	opts := []urlTestOption{}
+
+	// tolerance
+	if elm, ok := config["tolerance"]; ok {
+		if tolerance, ok := elm.(int); ok {
+			opts = append(opts, urlTestWithTolerance(uint16(tolerance)))
+		}
+	}
+
+	return opts
+}
+
+func NewURLTest(name string, providers []provider.ProxyProvider, options ...urlTestOption) *URLTest {
+	urlTest := &URLTest{
+		Base:       outbound.NewBase(name, "", C.URLTest, false),
 		single:     singledo.NewSingle(defaultGetProxiesDuration),
 		fastSingle: singledo.NewSingle(time.Second * 10),
 		providers:  providers,
 	}
+
+	for _, option := range options {
+		option(urlTest)
+	}
+
+	return urlTest
 }

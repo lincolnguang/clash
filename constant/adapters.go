@@ -10,15 +10,19 @@ import (
 // Adapter Type
 const (
 	Direct AdapterType = iota
-	Fallback
 	Reject
-	Selector
+
 	Shadowsocks
 	Snell
 	Socks5
 	Http
-	URLTest
 	Vmess
+	Trojan
+
+	Relay
+	Selector
+	Fallback
+	URLTest
 	LoadBalance
 )
 
@@ -53,15 +57,21 @@ type Conn interface {
 type PacketConn interface {
 	net.PacketConn
 	Connection
+	// Deprecate WriteWithMetadata because of remote resolve DNS cause TURN failed
+	// WriteWithMetadata(p []byte, metadata *Metadata) (n int, err error)
 }
 
 type ProxyAdapter interface {
 	Name() string
 	Type() AdapterType
+	StreamConn(c net.Conn, metadata *Metadata) (net.Conn, error)
 	DialContext(ctx context.Context, metadata *Metadata) (Conn, error)
-	DialUDP(metadata *Metadata) (PacketConn, net.Addr, error)
+	DialUDP(metadata *Metadata) (PacketConn, error)
 	SupportUDP() bool
 	MarshalJSON() ([]byte, error)
+	Addr() string
+	// Unwrap extracts the proxy from a proxy-group. It returns nil when nothing to extract.
+	Unwrap(metadata *Metadata) Proxy
 }
 
 type DelayHistory struct {
@@ -85,12 +95,9 @@ func (at AdapterType) String() string {
 	switch at {
 	case Direct:
 		return "Direct"
-	case Fallback:
-		return "Fallback"
 	case Reject:
 		return "Reject"
-	case Selector:
-		return "Selector"
+
 	case Shadowsocks:
 		return "Shadowsocks"
 	case Snell:
@@ -99,12 +106,22 @@ func (at AdapterType) String() string {
 		return "Socks5"
 	case Http:
 		return "Http"
-	case URLTest:
-		return "URLTest"
 	case Vmess:
 		return "Vmess"
+	case Trojan:
+		return "Trojan"
+
+	case Relay:
+		return "Relay"
+	case Selector:
+		return "Selector"
+	case Fallback:
+		return "Fallback"
+	case URLTest:
+		return "URLTest"
 	case LoadBalance:
 		return "LoadBalance"
+
 	default:
 		return "Unknown"
 	}
@@ -121,8 +138,8 @@ type UDPPacket interface {
 	//   this is important when using Fake-IP.
 	WriteBack(b []byte, addr net.Addr) (n int, err error)
 
-	// Close closes the underlaying connection.
-	Close() error
+	// Drop call after packet is used, could recycle buffer in this function.
+	Drop()
 
 	// LocalAddr returns the source IP/Port of packet
 	LocalAddr() net.Addr
